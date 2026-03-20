@@ -6,17 +6,17 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 struct editorConfig{
-    int cx, cy;
+    int cx, cy; //Cursor positions
     int screenrows;
     int screencols;
 
-    HANDLE hInput;
+    HANDLE hInput; 
     HANDLE hOutput;
 
     DWORD originalMode;
 };
 
-struct editorConfig E;
+struct editorConfig E; //? Why is there a struct in the definition of this?
 
 void disableRawMode()
 {
@@ -26,18 +26,22 @@ void disableRawMode()
 void enableRawMode()
 {
     E.hInput = GetStdHandle(STD_INPUT_HANDLE);
-    E.hOutput = GetStdHandle(STD_OUTPUT_HANDLE); //What do these get?
+    E.hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     
 
-    GetConsoleMode(E.hInput, &E.originalMode);
+    GetConsoleMode(E.hInput, &E.originalMode); 
+    /*
+    ! Here we store the bit flags that represent our current console's
+    ! settings in our DWORD
+    */
 
     DWORD raw = E.originalMode;
 
     raw &= ~(ENABLE_ECHO_INPUT |
              ENABLE_LINE_INPUT |
-             ENABLE_PROCESSED_INPUT); 
+             ENABLE_PROCESSED_INPUT); //? What do each of these do?
 
-    SetConsoleMode(E.hInput,raw);
+    SetConsoleMode(E.hInput,raw); //! Change the console mode of the standard output to be of the raw settings
     atexit(disableRawMode); //Does the order of this function's placement matter?
 }
 
@@ -77,7 +81,7 @@ void editorProcessKeypress()
 
 void editorClearScreen()
 {
-    printf("\x1b[2j");
+    printf("\x1b[2J"); //Gotta be putting explanations for my ascii chars here
     printf("\x1b[H");
 }
 
@@ -116,7 +120,7 @@ void initEditor()
     E.cx = 0;
     E.cy = 0;
 
-    if (getWindowSize(&E.screenrows, &E.screencols)==-1)
+    if (getWindowSize(&E.screenrows, &E.screencols)==-1) //? How does get window size work?
     {
         exit(1);
     }
