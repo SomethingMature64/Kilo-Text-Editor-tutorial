@@ -1,5 +1,5 @@
 #include <windows.h>
-#include <stdio.h> //What does this library do?
+#include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
@@ -8,18 +8,20 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define KILO_TAB_STOP 8 
 
+
+
 typedef struct erow {
     int size;
     char *chars;
 
     int rsize;
-    char *render; //?
+    char *render;
 } erow;
-struct editorConfig{
-    int cx, cy; //Cursor positions
-    int rx; //?
 
-    //We use both of these for scrolling
+struct editorConfig{
+    int cx, cy;
+    int rx;
+
     int rowoff;
     int coloff;
 
@@ -29,7 +31,7 @@ struct editorConfig{
     int numrows;
     erow *row;
 
-    char *filename; //? Why does this work 
+    char *filename;
 
     char statusmsg[80];
     time_t statusmsg_time;
@@ -39,73 +41,103 @@ struct editorConfig{
 
     DWORD originalMode;
 };
+
 struct editorConfig E;
 
-int getWindowSize(int *rows, int *cols);
-void editorAppendRow(char *s, size_t len);
-void editorUpdateRow(erow *row);
-void editorDrawStatusBar();
+/*** terminal ***/
 
-int getWindowSize(int *rows, int *cols)
+void disableRawMode()
 {
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    
-    if (!GetConsoleScreenBufferInfo(E.hOutput,&csbi))
-    {
-        return -1;
-    }
-    
-    *cols = csbi.srWindow.Right - csbi.srWindow.Left +1;
-    *rows = csbi.srWindow.Bottom - csbi.srWindow.Top +1;
-
-    return 0;
+    SetConsoleMode(E.hInput, E.originalMode);
 }
 
-void initEditor()
+void enableRawMode()
 {
-    E.cx = 0;
-    E.cy = 0;
+    E.hInput = GetStdHandle(STD_INPUT_HANDLE);
+    E.hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    E.numrows = 0;
-    E.row = NULL;
+    GetConsoleMode(E.hInput, &E.originalMode);
 
-    if (getWindowSize(&E.screenrows, &E.screencols)==-1) //? How does get window size work?
-    {
-        exit(1);
+    DWORD raw = E.originalMode;
+    raw &= ~(ENABLE_ECHO_INPUT |
+             ENABLE_LINE_INPUT |
+             ENABLE_PROCESSED_INPUT);
+
+    SetConsoleMode(E.hInput, raw);
+
+    DWORD mode;
+    GetConsoleMode(E.hOutput, &mode);
+    SetConsoleMode(E.hOutput, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+
+    atexit(disableRawMode);
+}
+
+/*** input ***/
+
+int editorReadKey() {
+    INPUT_RECORD record;
+    DWORD read;
+
+    while (1) {
+        ReadConsoleInput(E.hInput, &record, 1, &read);
+
+        if (record.EventType == KEY_EVENT &&
+            record.Event.KeyEvent.bKeyDown)
+        {
+            return record.Event.KeyEvent.uChar.AsciiChar;
+        }
     }
 }
 
-void editorOpen(const char *filename)
+void editorProcessKeypress()
 {
-    FILE *fp = fopen(filename,"r");
-    if (!fp) return;
+    int c = editorReadKey();
 
-    E.filename = _strdup(filename);
-
-    char line[1024]; //todo need to look into strings in c again
-
-    while (fgets(line,sizeof(line),fp))
-    {
-        int len = strlen(line);
-
-        while (len>0 && (line[len-1]=='\n' || line[len-1]=='\r'))
-            len--;
-
-        editorAppendRow(line,len);
+    if (c == CTRL_KEY('q')) {
+        exit(0);
     }
 
-    fclose(fp);
+    /* DEBUG → write into status bar instead */
+    snprintf(E.statusmsg, sizeof(E.statusmsg),
+             "Key: %d (%c)", c, c);
+    E.statusmsg_time = time(NULL);
 }
 
-void editorAppendRow(char*s, size_t len)
+/*** rows ***/
+
+void editorUpdateRow(erow *row)
 {
-    E.row = realloc(E.row,sizeof(erow) * (E.numrows+1));
+    int tabs = 0;
+    for (int j = 0; j < row->size; j++)
+        if (row->chars[j] == '\t') tabs++;
+
+    free(row->render);
+    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+
+    int idx = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % KILO_TAB_STOP != 0)
+                row->render[idx++] = ' ';
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+void editorAppendRow(char *s, size_t len)
+{
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
 
     int at = E.numrows;
     E.row[at].size = len;
     E.row[at].chars = malloc(len + 1);
 
-    memcpy(E.row[at].chars,s,len);
+    memcpy(E.row[at].chars, s, len);
     E.row[at].chars[len] = '\0';
 
     E.row[at].rsize = 0;
@@ -116,40 +148,38 @@ void editorAppendRow(char*s, size_t len)
     E.numrows++;
 }
 
-void editorUpdateRow(erow *row)
+/*** file i/o ***/
+
+void editorOpen(const char *filename)
 {
-    int tabs = 0;
-    for(int j = 0; j<row->size;j++)
-        if (row->chars[j] == '\t') tabs++;
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return;
 
-    free(row->render);
-    row->render = malloc(row->size + tabs*(KILO_TAB_STOP-1)+1);
+    E.filename = _strdup(filename);
 
-    int idx = 0;
-    for(int j = 0; j < row->size; j++)
-    {
-        if (row->chars[j]=='\t'){
-            row->render[idx++] = ' ';
-            while (idx % KILO_TAB_STOP != 0)
-            {
-                row -> render[idx++] = ' ';
-            }
-            
-        }
-        else{
-            row->render[idx++] = row->chars[j];
-        }
+    char line[1024];
+
+    while (fgets(line, sizeof(line), fp)) {
+        int len = strlen(line);
+
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            len--;
+
+        editorAppendRow(line, len);
     }
-    row->render[idx] = '\0';
-    row->rsize = idx;
+
+    fclose(fp);
 }
+
+/*** editor operations ***/
 
 void editorScroll()
 {
     E.rx = E.cx;
+
     if (E.cy < E.rowoff)
         E.rowoff = E.cy;
-    
+
     if (E.cy >= E.rowoff + E.screenrows)
         E.rowoff = E.cy - E.screenrows + 1;
 
@@ -160,111 +190,31 @@ void editorScroll()
         E.coloff = E.cx - E.screencols + 1;
 }
 
-void disableRawMode()
-{
-    SetConsoleMode(E.hInput,E.originalMode); //Why did we switch to a struct?
-}
-
-void enableRawMode()
-{
-    E.hInput = GetStdHandle(STD_INPUT_HANDLE);
-    E.hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    
-
-    GetConsoleMode(E.hInput, &E.originalMode); 
-    /*
-    ! Here we store the bit flags that represent our current console's
-    ! settings in our DWORD
-    */
-
-    DWORD raw = E.originalMode;
-
-    raw &= ~(ENABLE_ECHO_INPUT |
-             ENABLE_LINE_INPUT |
-             ENABLE_PROCESSED_INPUT); //? What do each of these do?
-
-    SetConsoleMode(E.hInput,raw); //! Change the console mode of the standard output to be of the raw settings
-    
-    DWORD mode;
-    GetConsoleMode(E.hOutput, &mode);
-    SetConsoleMode(E.hOutput, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    
-    atexit(disableRawMode); //Does the order of this function's placement matter?
-}
-
-int editorReadKey(){
-    INPUT_RECORD record; //? What's this
-    DWORD read;
-
-    while(1)
-    {   //? What is going on here?
-        ReadConsoleInput(E.hInput,&record,1,&read);
-
-        if (record.EventType == KEY_EVENT &&
-            record.Event.KeyEvent.bKeyDown)
-        {
-            return record.Event.KeyEvent.uChar.AsciiChar; 
-        }
-        
-    }
-}
-
-void editorProcessKeypress()
-{
-    int c = editorReadKey();
-    if (c==CTRL_KEY('q'))
-    {
-        exit(0);
-    }
-
-    if (iscntrl(c))
-    {
-        printf("%d\n",c);
-    } else
-    {
-        printf("%d ('%c')\n",c,c);
-    }
-}
-
-void editorClearScreen()
-{
-    printf("\x1b[2J"); //Gotta be putting explanations for my ascii chars here
-    printf("\x1b[H");
-}
+/*** output ***/
 
 void editorDrawRows()
 {
-    for (int i = 0; i < E.screenrows; i++)
-    {
-        int filerow = i + E.rowoff; //? Define outside the loop?
-        if (filerow >= E.numrows)
-            WriteConsole(E.hOutput,"~\r\n",3,NULL,NULL);
-        else
-        {
+    for (int y = 0; y < E.screenrows; y++) {
+        int filerow = y + E.rowoff;
+
+        if (filerow >= E.numrows) {
+            WriteConsoleA(E.hOutput, "~\r\n", 3, NULL, NULL);
+        } else {
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
 
-            WriteConsole(E.hOutput,&E.row[filerow].render[E.coloff],len,NULL,NULL);
+            WriteConsoleA(E.hOutput,
+                &E.row[filerow].render[E.coloff],
+                len, NULL, NULL);
 
-            WriteConsoleA(E.hOutput,"\r\n", 2, NULL,NULL);
+            WriteConsoleA(E.hOutput, "\r\n", 2, NULL, NULL);
         }
     }
 }
 
-void editorRefreshScreen()
-{
-    editorScroll();
-    editorClearScreen();
-    editorDrawRows();
-    editorDrawStatusBar();
-    printf("\x1b[H");
-}
-
-
-
 void editorDrawStatusBar() {
-    printf("\x1b[7m"); // inverted colors
+    printf("\x1b[7m");
 
     char status[80];
     int len = snprintf(status, sizeof(status),
@@ -282,23 +232,77 @@ void editorDrawStatusBar() {
 
     printf("\x1b[m");
     printf("\r\n");
+
+    /* message bar */
+    int msglen = strlen(E.statusmsg);
+    if (msglen > E.screencols) msglen = E.screencols;
+    fwrite(E.statusmsg, 1, msglen, stdout);
 }
+
+void editorRefreshScreen()
+{
+    editorScroll();
+
+    printf("\x1b[H");   // move cursor to top
+
+    editorDrawRows();
+    editorDrawStatusBar();
+
+    printf("\x1b[H");   // reset cursor again
+}
+
+/*** init ***/
+
+int getWindowSize(int *rows, int *cols)
+{
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+
+    if (!GetConsoleScreenBufferInfo(E.hOutput, &csbi)) {
+        return -1;
+    }
+
+    *cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    *rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+
+    return 0;
+}
+
+void initEditor()
+{
+    E.cx = 0;
+    E.cy = 0;
+
+    E.rowoff = 0;
+    E.coloff = 0;
+
+    E.numrows = 0;
+    E.row = NULL;
+
+    E.filename = NULL;
+    E.statusmsg[0] = '\0';
+
+    if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
+        exit(1);
+    }
+
+    E.screenrows -= 2; // leave space for status + message bar
+}
+
+/*** main ***/
 
 int main(int argc, char *argv[])
 {
     enableRawMode();
     initEditor();
 
-    if (argc >= 2)
-    {
+    if (argc >= 2) {
         editorOpen(argv[1]);
     }
 
-    while (1)
-    {
+    while (1) {
         editorRefreshScreen();
         editorProcessKeypress();
     }
-    
+
     return 0;
 }
