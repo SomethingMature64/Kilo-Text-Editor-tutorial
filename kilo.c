@@ -8,6 +8,8 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define KILO_TAB_STOP 8 
 
+void editorInsertNewline();
+void editorInsertChar(int c);
 enum editorKey {
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
@@ -156,7 +158,10 @@ void editorProcessKeypress()
         case CTRL_KEY('q'):
             exit(0);
             break;
-
+        case '\r': //ENTER
+            editorInsertNewline();
+            break;
+        
         case ARROW_UP:
         case ARROW_DOWN:
         case ARROW_LEFT:
@@ -165,6 +170,10 @@ void editorProcessKeypress()
             break;
 
         default:
+            if (!iscntrl(c))
+            {
+                editorInsertChar(c);
+            }
             break;
     }
 
@@ -275,8 +284,90 @@ void editorScroll()
         E.coloff = E.rx - E.screencols + 1;
 }
 
-/*** output ***/
+/* Input */
 
+void editorRowInsertChar(erow *row, int at, int c)
+{
+    if (at < 0 || at > row->size) at = row->size;
+
+    row -> chars = realloc(row->chars,row->size+2);
+    memmove(&row->chars[at+1],&row->chars[at],row->size - at + 1);
+
+    row -> size++;
+    row->chars[at] = c;
+
+    editorUpdateRow(row);
+}
+
+void editorInsertNewline()
+{
+    if (E.cx == 0) {
+        E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+
+        memmove(&E.row[E.cy + 1], &E.row[E.cy],
+                sizeof(erow) * (E.numrows - E.cy));
+
+        E.row[E.cy].size = 0;
+        E.row[E.cy].chars = malloc(1);
+        E.row[E.cy].chars[0] = '\0';
+
+        E.row[E.cy].rsize = 0;
+        E.row[E.cy].render = NULL;
+
+        editorUpdateRow(&E.row[E.cy]);
+
+        E.numrows++;
+    } 
+    else {
+        // DO NOT take pointer before realloc
+        int cx = E.cx;
+        int cy = E.cy;
+
+        E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+
+        memmove(&E.row[cy + 2], &E.row[cy + 1],
+                sizeof(erow) * (E.numrows - cy - 1));
+
+        // NOW safe to access rows again
+        erow *row = &E.row[cy];
+
+        // new row (right side)
+        E.row[cy + 1].size = row->size - cx;
+        E.row[cy + 1].chars = malloc(E.row[cy + 1].size + 1);
+
+        memcpy(E.row[cy + 1].chars,
+               &row->chars[cx],
+               E.row[cy + 1].size);
+
+        E.row[cy + 1].chars[E.row[cy + 1].size] = '\0';
+        E.row[cy + 1].render = NULL;
+        E.row[cy + 1].rsize = 0;
+
+        editorUpdateRow(&E.row[cy + 1]);
+
+        // shrink original row
+        row->size = cx;
+        row->chars[cx] = '\0';
+
+        editorUpdateRow(row);
+
+        E.numrows++;
+    }
+
+    E.cy++;
+    E.cx = 0;
+}
+
+void editorInsertChar(int c)
+{
+    if (E.cy == E.numrows) {
+        editorAppendRow("", 0);
+    }
+
+    editorRowInsertChar(&E.row[E.cy], E.cx, c);
+    E.cx++;
+}
+/*** output ***/
 void editorDrawRows()
 {
     for (int y = 0; y < E.screenrows; y++) {
