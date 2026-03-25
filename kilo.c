@@ -8,7 +8,12 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define KILO_TAB_STOP 8 
 
-
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN
+};
 
 typedef struct erow {
     int size;
@@ -84,8 +89,62 @@ int editorReadKey() {
         if (record.EventType == KEY_EVENT &&
             record.Event.KeyEvent.bKeyDown)
         {
-            return record.Event.KeyEvent.uChar.AsciiChar;
+            KEY_EVENT_RECORD key = record.Event.KeyEvent;
+
+            switch (key.wVirtualKeyCode)
+            {
+                case VK_LEFT:  return ARROW_LEFT;
+                case VK_RIGHT: return ARROW_RIGHT;
+                case VK_UP:    return ARROW_UP;
+                case VK_DOWN:  return ARROW_DOWN;
+            }
+
+            if (key.uChar.AsciiChar != 0)
+                return key.uChar.AsciiChar;
         }
+    }
+}
+
+void editorMoveCursor(int key)
+{
+    switch (key)
+    {
+        case ARROW_LEFT:
+            if (E.cx != 0) {
+                E.cx--;
+            } else if (E.cy > 0) {
+                E.cy--;
+                E.cx = E.row[E.cy].size;
+            }
+            break;
+
+        case ARROW_RIGHT:
+            if (E.cy < E.numrows) {
+                if (E.cx < E.row[E.cy].size) {
+                    E.cx++;
+                } else if (E.cx == E.row[E.cy].size) {
+                    E.cy++;
+                    E.cx = 0;
+                }
+            }
+            break;
+
+        case ARROW_UP:
+            if (E.cy != 0) {
+                E.cy--;
+            }
+            break;
+
+        case ARROW_DOWN:
+            if (E.cy < E.numrows - 1) {
+                E.cy++;
+            }
+            break;
+    }
+
+    int rowlen = (E.cy >= E.numrows) ? 0 : E.row[E.cy].size;
+    if (E.cx > rowlen) {
+        E.cx = rowlen;
     }
 }
 
@@ -93,13 +152,24 @@ void editorProcessKeypress()
 {
     int c = editorReadKey();
 
-    if (c == CTRL_KEY('q')) {
-        exit(0);
+    switch (c) {
+        case CTRL_KEY('q'):
+            exit(0);
+            break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+            editorMoveCursor(c);
+            break;
+
+        default:
+            break;
     }
 
-    /* DEBUG → write into status bar instead */
     snprintf(E.statusmsg, sizeof(E.statusmsg),
-             "Key: %d (%c)", c, c);
+             "cx=%d cy=%d", E.cx, E.cy);
     E.statusmsg_time = time(NULL);
 }
 
@@ -173,9 +243,24 @@ void editorOpen(const char *filename)
 
 /*** editor operations ***/
 
+int editorRowCxToRx(erow *row, int cx)
+{
+    int rx = 0;
+    for (int j = 0; j < cx; j++) {
+        if (row->chars[j] == '\t')
+            rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+        rx++;
+    }
+    return rx;
+}
+
 void editorScroll()
 {
-    E.rx = E.cx;
+    if (E.cy < E.numrows) {
+        E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+    } else {
+        E.rx = E.cx;
+    }
 
     if (E.cy < E.rowoff)
         E.rowoff = E.cy;
@@ -183,11 +268,11 @@ void editorScroll()
     if (E.cy >= E.rowoff + E.screenrows)
         E.rowoff = E.cy - E.screenrows + 1;
 
-    if (E.cx < E.coloff)
-        E.coloff = E.cx;
+    if (E.rx < E.coloff)
+        E.coloff = E.rx;
 
-    if (E.cx >= E.coloff + E.screencols)
-        E.coloff = E.cx - E.screencols + 1;
+    if (E.rx >= E.coloff + E.screencols)
+        E.coloff = E.rx - E.screencols + 1;
 }
 
 /*** output ***/
@@ -233,8 +318,7 @@ void editorDrawStatusBar() {
     printf("\x1b[m");
     printf("\r\n");
 
-    /* message bar */
-    int msglen = strlen(E.statusmsg);
+    int msglen = E.statusmsg[0] ? strlen(E.statusmsg) : 0;
     if (msglen > E.screencols) msglen = E.screencols;
     fwrite(E.statusmsg, 1, msglen, stdout);
 }
@@ -243,12 +327,15 @@ void editorRefreshScreen()
 {
     editorScroll();
 
-    printf("\x1b[H");   // move cursor to top
+    printf("\x1b[H");
 
     editorDrawRows();
     editorDrawStatusBar();
 
-    printf("\x1b[H");   // reset cursor again
+    int cx = (E.rx - E.coloff) + 1;
+    int cy = (E.cy - E.rowoff) + 1;
+
+    printf("\x1b[%d;%dH", cy, cx);
 }
 
 /*** init ***/
@@ -280,12 +367,13 @@ void initEditor()
 
     E.filename = NULL;
     E.statusmsg[0] = '\0';
+    E.statusmsg_time = 0;
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
         exit(1);
     }
 
-    E.screenrows -= 2; // leave space for status + message bar
+    E.screenrows -= 2;
 }
 
 /*** main ***/
