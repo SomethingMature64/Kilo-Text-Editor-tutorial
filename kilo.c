@@ -79,6 +79,51 @@ void enableRawMode()
     atexit(disableRawMode);
 }
 
+/*** rows ***/
+
+void editorUpdateRow(erow *row)
+{
+    int tabs = 0;
+    for (int j = 0; j < row->size; j++)
+        if (row->chars[j] == '\t') tabs++;
+
+    free(row->render);
+    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+
+    int idx = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % KILO_TAB_STOP != 0)
+                row->render[idx++] = ' ';
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+void editorAppendRow(char *s, size_t len)
+{
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+
+    int at = E.numrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+
+    E.row[at].rsize = 0;
+    E.row[at].render = NULL;
+
+    editorUpdateRow(&E.row[at]);
+
+    E.numrows++;
+}
+
 /*** input ***/
 
 int editorReadKey() {
@@ -150,6 +195,67 @@ void editorMoveCursor(int key)
     }
 }
 
+void editorDelRow(int at)
+{
+    if (at < 0 || at >= E.numrows) return;
+
+    free(E.row[at].chars);
+    free(E.row[at].render);
+
+    memmove(&E.row[at], &E.row[at+1], sizeof(erow)*(E.numrows-at-1));
+
+    E.numrows--;
+    
+}
+
+void editorRowDelChar(erow *row, int at)
+{
+    if (at < 0 || at >= row->size) return;
+
+    memmove(&row->chars[at],&row->chars[at+1],
+    row->size - at);
+
+    row->size--;
+
+    editorUpdateRow(row);
+}
+
+void editorDelChar()
+{
+    if (E.cy == E.numrows) return;
+    if (E.cx == 0 && E.cy == 0) return;
+
+    erow *row = &E.row[E.cy];
+
+    if (E.cx >0)
+    {
+        //Case 1: Delete within line
+        editorRowDelChar(row,E.cx-1);
+        E.cx--;
+    } else
+    {
+        // Case 2: merge with previous line
+        int prev_len = E.row[E.cy - 1].size;
+
+        //expand previous row
+        E.row[E.cy-1].chars=realloc(
+            E.row[E.cy-1].chars,prev_len+row->size+1
+        );
+
+        memcpy(&E.row[E.cy-1].chars[prev_len], row->chars, row->size);
+
+        E.row[E.cy - 1].size = prev_len + row->size;
+        E.row[E.cy-1].chars[E.row[E.cy-1].size]='\0';
+
+        editorUpdateRow(&E.row[E.cy-1]);
+
+        editorDelRow(E.cy);
+
+        E.cy--;
+        E.cx = prev_len;
+    }
+}
+
 void editorProcessKeypress()
 {
     int c = editorReadKey();
@@ -160,6 +266,11 @@ void editorProcessKeypress()
             break;
         case '\r': //ENTER
             editorInsertNewline();
+            break;
+        
+        case 127: //Backspace
+        case CTRL_KEY('h'): //? What does this do?
+            editorDelChar();
             break;
         
         case ARROW_UP:
@@ -180,51 +291,6 @@ void editorProcessKeypress()
     snprintf(E.statusmsg, sizeof(E.statusmsg),
              "cx=%d cy=%d", E.cx, E.cy);
     E.statusmsg_time = time(NULL);
-}
-
-/*** rows ***/
-
-void editorUpdateRow(erow *row)
-{
-    int tabs = 0;
-    for (int j = 0; j < row->size; j++)
-        if (row->chars[j] == '\t') tabs++;
-
-    free(row->render);
-    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
-
-    int idx = 0;
-    for (int j = 0; j < row->size; j++) {
-        if (row->chars[j] == '\t') {
-            row->render[idx++] = ' ';
-            while (idx % KILO_TAB_STOP != 0)
-                row->render[idx++] = ' ';
-        } else {
-            row->render[idx++] = row->chars[j];
-        }
-    }
-
-    row->render[idx] = '\0';
-    row->rsize = idx;
-}
-
-void editorAppendRow(char *s, size_t len)
-{
-    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
-
-    int at = E.numrows;
-    E.row[at].size = len;
-    E.row[at].chars = malloc(len + 1);
-
-    memcpy(E.row[at].chars, s, len);
-    E.row[at].chars[len] = '\0';
-
-    E.row[at].rsize = 0;
-    E.row[at].render = NULL;
-
-    editorUpdateRow(&E.row[at]);
-
-    E.numrows++;
 }
 
 /*** file i/o ***/
@@ -265,6 +331,7 @@ int editorRowCxToRx(erow *row, int cx)
 
 void editorScroll()
 {
+    //? I don't get the logic here
     if (E.cy < E.numrows) {
         E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
     } else {
@@ -380,6 +447,8 @@ void editorDrawRows()
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
 
+            WriteConsoleA(E.hOutput,"\x1b[K",3,NULL,NULL);
+
             WriteConsoleA(E.hOutput,
                 &E.row[filerow].render[E.coloff],
                 len, NULL, NULL);
@@ -418,7 +487,8 @@ void editorRefreshScreen()
 {
     editorScroll();
 
-    printf("\x1b[H");
+    printf("\x1b[2J");
+    printf("\x1b[H"); 
 
     editorDrawRows();
     editorDrawStatusBar();
@@ -460,11 +530,11 @@ void initEditor()
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
 
-    if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
+    if (getWindowSize(&E.screenrows, &E.screencols) == -1) { //? Why would this be -1?
         exit(1);
     }
 
-    E.screenrows -= 2;
+    E.screenrows -= 2; //? why
 }
 
 /*** main ***/
@@ -479,6 +549,7 @@ int main(int argc, char *argv[])
     }
 
     while (1) {
+        // So we never break out of the loop rather the program ends from the functions themselves?
         editorRefreshScreen();
         editorProcessKeypress();
     }
