@@ -10,6 +10,7 @@
 
 void editorInsertNewline();
 void editorInsertChar(int c);
+void editorSave();
 enum editorKey {
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
@@ -272,6 +273,10 @@ void editorProcessKeypress()
         case CTRL_KEY('h'): //? What does this do?
             editorDelChar();
             break;
+
+        case CTRL_KEY('s'):
+            editorSave();
+            break;
         
         case ARROW_UP:
         case ARROW_DOWN:
@@ -497,6 +502,51 @@ void editorRefreshScreen()
     int cy = (E.cy - E.rowoff) + 1;
 
     printf("\x1b[%d;%dH", cy, cx);
+}
+
+/*** saving ***/
+
+char *editorRowsToString(int *buflen)
+{
+    int totlen=0;
+
+    for (int j = 0; j<E.numrows;j++)
+        totlen += E.row[j].size + 1; //+1 for '\n
+
+    *buflen = totlen;
+
+    char *buf = malloc(totlen);
+    char*p = buf;
+
+    for (int j = 0; j<E.numrows;j++){
+        memcpy(p,E.row[j].chars,E.row[j].size);
+        p += E.row[j].size;
+
+        *p = '\n';
+        p++;
+    }
+    return buf;
+}
+
+void editorSave()
+{
+    if (E.filename == NULL) return;
+
+    int len;
+    char *buf = editorRowsToString(&len);
+
+    FILE *fp = fopen(E.filename,"w");
+    if(!fp){
+        free(buf);
+        return;
+    }
+
+    fwrite(buf,1,len,fp);
+    fclose(fp);
+
+    free(buf);
+
+    snprintf(E.statusmsg,sizeof(E.statusmsg), "%d bytes written to disk", len);
 }
 
 /*** init ***/
