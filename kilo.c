@@ -9,6 +9,7 @@
 #define KILO_TAB_STOP 8 
 #define HL_NORMAL 0
 #define HL_MATCH 1
+#define HL_OTHER 2
 
 void editorInsertNewline();
 void editorInsertChar(int c);
@@ -444,7 +445,12 @@ void editorDrawRows()
                 if (hl[j] != last_hl) {
                     WORD attr = E.default_attr;
                     if (hl[j] == HL_MATCH) {
-                        attr = BACKGROUND_RED | BACKGROUND_GREEN; // yellow bg, black fg
+                        // Bright (current match)
+                        attr = BACKGROUND_RED | BACKGROUND_GREEN; // yellow
+                    }
+                    else if (hl[j] == HL_OTHER) {
+                        // Dim (other matches)
+                        attr = BACKGROUND_BLUE | FOREGROUND_INTENSITY; 
                     }
                     SetConsoleTextAttribute(E.hOutput, attr);
                     last_hl = hl[j];
@@ -598,79 +604,79 @@ void editorFindCallback(char *query, int key)
     static int last_match = -1;
     static int direction = 1;
 
-    // clear highlights
-    for(int i = 0; i < E.numrows; i++)
-    {
+    // Clear all highlights
+    for (int i = 0; i < E.numrows; i++) {
         memset(E.row[i].hl, HL_NORMAL, sizeof(int) * E.row[i].rsize);
     }
 
-    if (key == '\r' || key == 27)
-    {
+    if (key == '\r' || key == 27) {
         last_match = -1;
         direction = 1;
         return;
-    }
-    else if (key == ARROW_RIGHT || key == ARROW_DOWN){
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
         direction = 1;
-    }
-    else if (key == ARROW_LEFT || key == ARROW_UP)
-    {
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
         direction = -1;
-    }
-    else {
+    } else {
         last_match = -1;
         direction = 1;
     }
 
-    if (last_match == -1) direction = 1;
-    
+    int query_len = strlen(query);
+
+    // 🔥 STEP 1: Highlight ALL matches as HL_OTHER
+    for (int i = 0; i < E.numrows; i++) {
+        char *row = E.row[i].chars;
+        char *match = row;
+
+        while ((match = strstr(match, query)) != NULL) {
+            int cx = match - row;
+
+            int rx = editorRowCxToRx(&E.row[i], cx);
+
+            for (int j = 0; j < query_len; j++) {
+                if (rx + j < E.row[i].rsize)
+                    E.row[i].hl[rx + j] = HL_OTHER;
+            }
+
+            match += query_len;
+        }
+    }
+
+    // 🔥 STEP 2: Find NEXT match (your existing logic)
     int current = last_match;
 
-    for (int i = 0; i < E.numrows; i++)
-    {
+    for (int i = 0; i < E.numrows; i++) {
         current += direction;
 
-        if (current == -1) current = E.numrows -1;
+        if (current == -1) current = E.numrows - 1;
         else if (current == E.numrows) current = 0;
 
-        char *match = strstr(E.row[current].chars,query);
+        char *match = strstr(E.row[current].chars, query);
 
-        if (match)
-        {
+        if (match) {
             last_match = current;
 
             E.cy = current;
             E.cx = match - E.row[current].chars;
             E.rx = editorRowCxToRx(&E.row[current], E.cx);
-            E.rowoff = E.cy;
-            E.coloff = E.rx;
 
-            int render_pos = 0;
-            for (int j = 0; j < E.cx; j++) {
-                if (E.row[current].chars[j] == '\t') {
-                    render_pos += KILO_TAB_STOP - (render_pos % KILO_TAB_STOP);
-                } else {
-                    render_pos++;
-                }
+            // Center scroll
+            E.rowoff = E.cy - E.screenrows / 2;
+            if (E.rowoff < 0) E.rowoff = 0;
+
+            E.coloff = E.rx - E.screencols / 2;
+            if (E.coloff < 0) E.coloff = 0;
+
+            // 🔥 STEP 3: Override current match → HL_MATCH
+            int rx = E.rx;
+            for (int j = 0; j < query_len; j++) {
+                if (rx + j < E.row[current].rsize)
+                    E.row[current].hl[rx + j] = HL_MATCH;
             }
 
-            int query_len = strlen(query);
-            int rp = render_pos;
-            for (int i = 0; i < query_len; i++) {
-                if (query[i] == '\t') {
-                    int spaces = KILO_TAB_STOP - (rp % KILO_TAB_STOP);
-                    for (int k = 0; k < spaces; k++) {
-                        E.row[current].hl[rp + k] = HL_MATCH;
-                    }
-                    rp += spaces;
-                } else {
-                    E.row[current].hl[rp] = HL_MATCH;
-                    rp++;
-                }
-            }
             break;
-            
-        }   
+        }
     }
 }
 
