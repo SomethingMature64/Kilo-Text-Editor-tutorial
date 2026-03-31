@@ -7,6 +7,8 @@
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define KILO_TAB_STOP 8 
+#define HL_NORMAL 0
+#define HL_MATCH 1
 
 void editorInsertNewline();
 void editorInsertChar(int c);
@@ -27,6 +29,7 @@ typedef struct erow {
 
     int rsize;
     char *render;
+    int *hl;
     
 } erow;
 
@@ -52,6 +55,7 @@ struct editorConfig{
     HANDLE hOutput;
 
     DWORD originalMode;
+    WORD default_attr;
 };
 
 struct editorConfig E;
@@ -108,6 +112,8 @@ void editorUpdateRow(erow *row)
 
     row->render[idx] = '\0';
     row->rsize = idx;
+    row->hl = realloc(row->hl, sizeof(int) * row->rsize);
+    memset(row->hl, 0, sizeof(int) * row->rsize);
 }
 
 void editorAppendRow(char *s, size_t len)
@@ -123,6 +129,7 @@ void editorAppendRow(char *s, size_t len)
 
     E.row[at].rsize = 0;
     E.row[at].render = NULL;
+    E.row[at].hl = NULL;
 
     editorUpdateRow(&E.row[at]);
 
@@ -206,6 +213,7 @@ void editorDelRow(int at)
 
     free(E.row[at].chars);
     free(E.row[at].render);
+    free(E.row[at].hl);
 
     memmove(&E.row[at], &E.row[at+1], sizeof(erow)*(E.numrows-at-1));
 
@@ -358,6 +366,7 @@ void editorInsertNewline()
 
         E.row[E.cy].rsize = 0;
         E.row[E.cy].render = NULL;
+        E.row[E.cy].hl = NULL;
 
         editorUpdateRow(&E.row[E.cy]);
 
@@ -387,6 +396,7 @@ void editorInsertNewline()
         E.row[cy + 1].chars[E.row[cy + 1].size] = '\0';
         E.row[cy + 1].render = NULL;
         E.row[cy + 1].rsize = 0;
+        E.row[cy + 1].hl = NULL;
 
         editorUpdateRow(&E.row[cy + 1]);
 
@@ -425,56 +435,73 @@ void editorDrawRows()
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
 
-            WriteConsoleA(E.hOutput,"\x1b[K",3,NULL,NULL);
+            char *c = &E.row[filerow].render[E.coloff];
+            int *hl = &E.row[filerow].hl[E.coloff];
 
-            WriteConsoleA(E.hOutput,
-                &E.row[filerow].render[E.coloff],
-                len, NULL, NULL);
-
+            int last_hl = -1;
+            for (int j = 0; j < len; j++)
+            {
+                if (hl[j] != last_hl) {
+                    WORD attr = E.default_attr;
+                    if (hl[j] == HL_MATCH) {
+                        attr = BACKGROUND_RED | BACKGROUND_GREEN; // yellow bg, black fg
+                    }
+                    SetConsoleTextAttribute(E.hOutput, attr);
+                    last_hl = hl[j];
+                }
+                WriteConsoleA(E.hOutput, &c[j], 1, NULL, NULL);
+            }
+            SetConsoleTextAttribute(E.hOutput, E.default_attr);
+        
             WriteConsoleA(E.hOutput, "\r\n", 2, NULL, NULL);
         }
     }
 }
 
 void editorDrawStatusBar() {
-    printf("\x1b[7m");
+    WORD inverse_attr = ((E.default_attr & 0x0F) << 4) | ((E.default_attr & 0xF0) >> 4);
+    SetConsoleTextAttribute(E.hOutput, inverse_attr);
 
     char status[80];
-    int len = snprintf(status, sizeof(status),
-        "%.20s - %d lines",
+    int len = sprintf(status, "%.20s - %d lines",
         E.filename ? E.filename : "[No Name]",
         E.numrows);
 
     if (len > E.screencols) len = E.screencols;
-    fwrite(status, 1, len, stdout);
+    WriteConsoleA(E.hOutput, status, len, NULL, NULL);
 
-    while (len < E.screencols) {
-        putchar(' ');
-        len++;
-    }
+    char spaces[E.screencols - len];
+    memset(spaces, ' ', E.screencols - len);
+    WriteConsoleA(E.hOutput, spaces, E.screencols - len, NULL, NULL);
 
-    printf("\x1b[m");
-    printf("\r\n");
+    WriteConsoleA(E.hOutput, "\r\n", 2, NULL, NULL);
+
+    SetConsoleTextAttribute(E.hOutput, E.default_attr);
 
     int msglen = E.statusmsg[0] ? strlen(E.statusmsg) : 0;
     if (msglen > E.screencols) msglen = E.screencols;
-    fwrite(E.statusmsg, 1, msglen, stdout);
+    WriteConsoleA(E.hOutput, E.statusmsg, msglen, NULL, NULL);
 }
 
 void editorRefreshScreen()
 {
     editorScroll();
 
-    printf("\x1b[2J");
-    printf("\x1b[H"); 
+    // Clear the screen using Windows API
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(E.hOutput, &csbi)) {
+        DWORD written;
+        COORD coord = {0, 0};
+        FillConsoleOutputCharacter(E.hOutput, ' ', csbi.dwSize.X * csbi.dwSize.Y, coord, &written);
+        FillConsoleOutputAttribute(E.hOutput, csbi.wAttributes, csbi.dwSize.X * csbi.dwSize.Y, coord, &written);
+        SetConsoleCursorPosition(E.hOutput, coord);
+    }
 
     editorDrawRows();
     editorDrawStatusBar();
 
-    int cx = (E.rx - E.coloff) + 1;
-    int cy = (E.cy - E.rowoff) + 1;
-
-    printf("\x1b[%d;%dH", cy, cx);
+    COORD cursor_coord = {(SHORT)(E.rx - E.coloff), (SHORT)(E.cy - E.rowoff)};
+    SetConsoleCursorPosition(E.hOutput, cursor_coord);
 }
 
 /*** editor operations ***/
@@ -571,6 +598,12 @@ void editorFindCallback(char *query, int key)
     static int last_match = -1;
     static int direction = 1;
 
+    // clear highlights
+    for(int i = 0; i < E.numrows; i++)
+    {
+        memset(E.row[i].hl, HL_NORMAL, sizeof(int) * E.row[i].rsize);
+    }
+
     if (key == '\r' || key == 27)
     {
         last_match = -1;
@@ -608,9 +641,35 @@ void editorFindCallback(char *query, int key)
 
             E.cy = current;
             E.cx = match - E.row[current].chars;
-            E.rowoff = E.numrows;
+            E.rx = editorRowCxToRx(&E.row[current], E.cx);
+            E.rowoff = E.cy;
+            E.coloff = E.rx;
 
+            int render_pos = 0;
+            for (int j = 0; j < E.cx; j++) {
+                if (E.row[current].chars[j] == '\t') {
+                    render_pos += KILO_TAB_STOP - (render_pos % KILO_TAB_STOP);
+                } else {
+                    render_pos++;
+                }
+            }
+
+            int query_len = strlen(query);
+            int rp = render_pos;
+            for (int i = 0; i < query_len; i++) {
+                if (query[i] == '\t') {
+                    int spaces = KILO_TAB_STOP - (rp % KILO_TAB_STOP);
+                    for (int k = 0; k < spaces; k++) {
+                        E.row[current].hl[rp + k] = HL_MATCH;
+                    }
+                    rp += spaces;
+                } else {
+                    E.row[current].hl[rp] = HL_MATCH;
+                    rp++;
+                }
+            }
             break;
+            
         }   
     }
 }
@@ -705,6 +764,10 @@ void initEditor()
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) { //? Why would this be -1?
         exit(1);
     }
+
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    GetConsoleScreenBufferInfo(E.hOutput, &csbi);
+    E.default_attr = csbi.wAttributes;
 
     E.screenrows -= 2; //? why
 }
