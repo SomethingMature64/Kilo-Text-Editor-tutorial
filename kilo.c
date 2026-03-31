@@ -11,6 +11,8 @@
 void editorInsertNewline();
 void editorInsertChar(int c);
 void editorSave();
+void editorFind();
+
 enum editorKey {
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
@@ -25,6 +27,28 @@ typedef struct erow {
     int rsize;
     char *render;
 } erow;
+
+struct abuf{
+    char *b;
+    int len;
+};
+
+void abAppend(struct abuf *ab, const char *s, int len)
+{
+    char *new = realloc(ab->b, ab->len + len);
+
+    if (new == NULL) return;
+
+    memcpy(&new[ab->len],s,len);
+    ab->b = new;
+    ab->len += len;
+    
+}
+
+void abFree(struct abuf *ab)
+{
+    free(ab->b);
+}
 
 struct editorConfig{
     int cx, cy;
@@ -46,6 +70,8 @@ struct editorConfig{
 
     HANDLE hInput; 
     HANDLE hOutput;
+    HANDLE hBackBuffer;
+    HANDLE hFrontBuffer;
 
     DWORD originalMode;
 };
@@ -57,12 +83,24 @@ struct editorConfig E;
 void disableRawMode()
 {
     SetConsoleMode(E.hInput, E.originalMode);
+    if (E.hBackBuffer != NULL && E.hBackBuffer != E.hFrontBuffer) {
+        CloseHandle(E.hBackBuffer);
+    }
 }
 
 void enableRawMode()
 {
     E.hInput = GetStdHandle(STD_INPUT_HANDLE);
     E.hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    E.hFrontBuffer = E.hOutput;
+    
+    // Create back buffer
+    E.hBackBuffer = CreateConsoleScreenBuffer(
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        CONSOLE_TEXTMODE_BUFFER,
+        NULL);
 
     GetConsoleMode(E.hInput, &E.originalMode);
 
@@ -74,8 +112,8 @@ void enableRawMode()
     SetConsoleMode(E.hInput, raw);
 
     DWORD mode;
-    GetConsoleMode(E.hOutput, &mode);
-    SetConsoleMode(E.hOutput, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    GetConsoleMode(E.hBackBuffer, &mode);
+    SetConsoleMode(E.hBackBuffer, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
     atexit(disableRawMode);
 }
@@ -277,6 +315,10 @@ void editorProcessKeypress()
         case CTRL_KEY('s'):
             editorSave();
             break;
+
+        case CTRL_KEY('f'):
+            editorFind();
+            break;
         
         case ARROW_UP:
         case ARROW_DOWN:
@@ -440,31 +482,31 @@ void editorInsertChar(int c)
     E.cx++;
 }
 /*** output ***/
-void editorDrawRows()
+void editorDrawRows(struct abuf *ab)
 {
     for (int y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
 
         if (filerow >= E.numrows) {
-            WriteConsoleA(E.hOutput, "~\r\n", 3, NULL, NULL);
+            abAppend(ab, "~", 1);
         } else {
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
 
-            WriteConsoleA(E.hOutput,"\x1b[K",3,NULL,NULL);
-
-            WriteConsoleA(E.hOutput,
+            abAppend(ab, "\x1b[K", 3); // clear line
+            abAppend(ab,
                 &E.row[filerow].render[E.coloff],
-                len, NULL, NULL);
-
-            WriteConsoleA(E.hOutput, "\r\n", 2, NULL, NULL);
+                len);
         }
+
+        abAppend(ab, "\r\n", 2);
     }
 }
 
-void editorDrawStatusBar() {
-    printf("\x1b[7m");
+void editorDrawStatusBar(struct abuf *ab)
+{
+    abAppend(ab, "\x1b[7m", 4);
 
     char status[80];
     int len = snprintf(status, sizeof(status),
@@ -473,37 +515,127 @@ void editorDrawStatusBar() {
         E.numrows);
 
     if (len > E.screencols) len = E.screencols;
-    fwrite(status, 1, len, stdout);
+
+    abAppend(ab, status, len);
 
     while (len < E.screencols) {
-        putchar(' ');
+        abAppend(ab, " ", 1);
         len++;
     }
 
-    printf("\x1b[m");
-    printf("\r\n");
+    abAppend(ab, "\x1b[m", 3);
+    abAppend(ab, "\r\n", 2);
 
-    int msglen = E.statusmsg[0] ? strlen(E.statusmsg) : 0;
+    int msglen = strlen(E.statusmsg);
     if (msglen > E.screencols) msglen = E.screencols;
-    fwrite(E.statusmsg, 1, msglen, stdout);
+
+    abAppend(ab, E.statusmsg, msglen);
 }
 
 void editorRefreshScreen()
 {
     editorScroll();
 
-    printf("\x1b[2J");
-    printf("\x1b[H"); 
+    struct abuf ab = {NULL, 0};
 
-    editorDrawRows();
-    editorDrawStatusBar();
+    abAppend(&ab, "\x1b[2J", 4); // clear screen
+    abAppend(&ab, "\x1b[H", 3);  // move cursor top
 
+    editorDrawRows(&ab);
+    editorDrawStatusBar(&ab);
+
+    // position cursor
+    char buf[32];
     int cx = (E.rx - E.coloff) + 1;
     int cy = (E.cy - E.rowoff) + 1;
 
-    printf("\x1b[%d;%dH", cy, cx);
+    int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cy, cx);
+    abAppend(&ab, buf, len);
+
+    // Write to back buffer
+    WriteConsoleA(E.hBackBuffer, ab.b, ab.len, NULL, NULL);
+    
+    // Swap buffers - this atomically switches displayed content
+    SetConsoleActiveScreenBuffer(E.hBackBuffer);
+    
+    // Swap handles for next frame
+    HANDLE temp = E.hBackBuffer;
+    E.hBackBuffer = E.hFrontBuffer;
+    E.hFrontBuffer = temp;
+
+    abFree(&ab);
 }
 
+/*** Searching ***/
+char *editorPrompt(char *prompt)
+{
+    size_t bufsize = 128;
+    char *buf = malloc(bufsize);
+
+    size_t buflen = 0;
+    buf[0] = '\0';
+
+    while (1)
+    {
+        snprintf(E.statusmsg,sizeof(E.statusmsg),prompt,buf);
+        editorRefreshScreen();
+
+        int c = editorReadKey(); //? What's it with all these defining objects in loops
+
+        if (c == '\r')
+        {
+            if (buflen != 0)
+            {
+                E.statusmsg[0] = '\0';
+                return buf;
+            }
+            
+        } else if (c == 127 || c == CTRL_KEY('h')) //We press backspace
+        {
+            if (buflen != 0)
+            {
+                buflen--;
+                buf[buflen] = '\0';
+            }
+            
+        } else if (!iscntrl(c) && c<128)
+        {
+            if (buflen == bufsize - 1)
+            {
+                bufsize *= 2;
+                buf = realloc(buf,bufsize);
+            }
+
+            buf[buflen++] = c;
+            buf[buflen] = '\0';
+            
+        }
+        
+    }
+    
+}
+
+void editorFind()
+{
+    char *query = editorPrompt("Search: %s");
+
+    if (query == NULL) return;
+
+    for (int i = 0; i < E.numrows; i++)
+    {
+        char *match = strstr(E.row[i].chars,query);
+
+        if(match)
+        {
+            E.cy = i;
+            E.cx = match - E.row[i].chars;
+            E.rowoff = E.numrows; //force scroll
+            break;
+        }
+    }
+    
+    
+}
 /*** saving ***/
 
 char *editorRowsToString(int *buflen)
