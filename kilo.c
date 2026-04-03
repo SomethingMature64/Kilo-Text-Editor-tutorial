@@ -6,7 +6,7 @@
 #include <time.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
-#define KILO_TAB_STOP 8 
+#define KILO_TAB_STOP 8 //We're moving towards stops, the same way you'd do it in obsidian
 #define HL_NORMAL 0
 #define HL_MATCH 1
 #define HL_OTHER 2
@@ -91,19 +91,19 @@ void enableRawMode()
 
 /*** rows ***/
 
-void editorUpdateRow(erow *row)
+void editorUpdateRow(erow *row) /// Prepares the render version of a row
 {
     int tabs = 0;
     for (int j = 0; j < row->size; j++)
         if (row->chars[j] == '\t') tabs++;
 
-    free(row->render);
+    free(row->render); 
     row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
 
     int idx = 0;
     for (int j = 0; j < row->size; j++) {
         if (row->chars[j] == '\t') {
-            row->render[idx++] = ' ';
+            row->render[idx++] = ' '; //Every tab is atleast 1 space
             while (idx % KILO_TAB_STOP != 0)
                 row->render[idx++] = ' ';
         } else {
@@ -119,17 +119,19 @@ void editorUpdateRow(erow *row)
 
 void editorAppendRow(char *s, size_t len)
 {
+    ///Appends characters as a row to the row array
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
 
-    int at = E.numrows;
+    int at = E.numrows; //The last row in our array of Erows
     E.row[at].size = len;
-    E.row[at].chars = malloc(len + 1);
+    E.row[at].chars = malloc(len + 1); /*Allocate enough space for both
+    the characters and the end of line character*/
 
-    memcpy(E.row[at].chars, s, len);
+    memcpy(E.row[at].chars, s, len); //Copy the characters from s to our new row's address
     E.row[at].chars[len] = '\0';
 
     E.row[at].rsize = 0;
-    E.row[at].render = NULL;
+    E.row[at].render = NULL; //Setup its renderer
     E.row[at].hl = NULL;
 
     editorUpdateRow(&E.row[at]);
@@ -312,33 +314,8 @@ void editorProcessKeypress()
 
     snprintf(E.statusmsg, sizeof(E.statusmsg),
              "cx=%d cy=%d", E.cx, E.cy);
-    E.statusmsg_time = time(NULL);
+    //E.statusmsg_time = time(NULL);
 }
-
-/*** file i/o ***/
-
-void editorOpen(const char *filename)
-{
-    FILE *fp = fopen(filename, "r");
-    if (!fp) return;
-
-    E.filename = _strdup(filename);
-
-    char line[1024];
-
-    while (fgets(line, sizeof(line), fp)) {
-        int len = strlen(line);
-
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
-            len--;
-
-        editorAppendRow(line, len);
-    }
-
-    fclose(fp);
-}
-
-/* Input */
 
 void editorRowInsertChar(erow *row, int at, int c)
 {
@@ -423,6 +400,7 @@ void editorInsertChar(int c)
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     E.cx++;
 }
+
 /*** output ***/
 void editorDrawRows()
 {
@@ -433,11 +411,11 @@ void editorDrawRows()
             WriteConsoleA(E.hOutput, "~\r\n", 3, NULL, NULL);
         } else {
             int len = E.row[filerow].rsize - E.coloff;
-            if (len < 0) len = 0;
-            if (len > E.screencols) len = E.screencols;
+            if (len < 0) len = 0; //If it's shorter than the row width then give us 0(if the row contents are off screen to the left)
+            if (len > E.screencols) len = E.screencols; //If it's longer than the row then only display the part that is the screen width
 
-            char *c = &E.row[filerow].render[E.coloff];
-            int *hl = &E.row[filerow].hl[E.coloff];
+            char *c = &E.row[filerow].render[E.coloff]; //for row filerow get me the location of the first character at the column offset
+            int *hl = &E.row[filerow].hl[E.coloff]; //From the color array get me the first character as well
 
             int last_hl = -1;
             for (int j = 0; j < len; j++)
@@ -535,8 +513,8 @@ void editorScroll()
     if (E.cy < E.rowoff)
         E.rowoff = E.cy;
 
-    if (E.cy >= E.rowoff + E.screenrows)
-        E.rowoff = E.cy - E.screenrows + 1;
+    if (E.cy >= E.rowoff + E.screenrows) //If the cursor position is below the screen now
+        E.rowoff = E.cy - E.screenrows + 1; //To get the new top of screen row
 
     if (E.rx < E.coloff)
         E.coloff = E.rx;
@@ -691,7 +669,27 @@ void editorFind()
 }
 
 
-/*** saving ***/
+/*** File I/O ***/
+void editorOpen(const char *filename)
+{
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return;
+
+    E.filename = _strdup(filename);
+
+    char line[1024];
+
+    while (fgets(line, sizeof(line), fp)) {
+        int len = strlen(line);
+
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            len--;
+
+        editorAppendRow(line, len);
+    }
+
+    fclose(fp);
+}
 
 char *editorRowsToString(int *buflen)
 {
