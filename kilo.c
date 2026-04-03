@@ -16,6 +16,7 @@ void editorInsertChar(int c);
 void editorSave();
 void editorFind();
 void editorScroll();
+void TypewriterScroll();
 
 enum editorKey {
     ARROW_LEFT = 1000,
@@ -469,7 +470,7 @@ void editorDrawStatusBar() {
 
 void editorRefreshScreen()
 {
-    editorScroll();
+    TypewriterScroll();
 
     // Clear the screen using Windows API
     CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -514,7 +515,28 @@ void editorScroll()
         E.rowoff = E.cy;
 
     if (E.cy >= E.rowoff + E.screenrows) //If the cursor position is below the screen now
-        E.rowoff = E.cy - E.screenrows + 1; //To get the new top of screen row
+        E.rowoff = E.cy - E.screenrows + 1; //To get the new top of screen row. So basically we're inching the screen down, but it works even if we somehow jump
+
+    if (E.rx < E.coloff)
+        E.coloff = E.rx;
+
+    if (E.rx >= E.coloff + E.screencols)
+        E.coloff = E.rx - E.screencols + 1;
+}
+
+void TypewriterScroll()
+{
+    int halfway = E.screenrows/2;
+
+    E.rowoff = E.cy - halfway;
+    E.rowoff = E.rowoff < 0 ? 0 : E.rowoff;
+
+    //! Horizontal cursor movement is the same
+    if (E.cy < E.numrows) {
+        E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+    } else {
+        E.rx = E.cx;
+    }
 
     if (E.rx < E.coloff)
         E.coloff = E.rx;
