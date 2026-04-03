@@ -17,6 +17,7 @@ void editorSave();
 void editorFind();
 void editorScroll();
 void TypewriterScroll();
+void editorRefreshScreen();
 
 enum editorKey {
     ARROW_LEFT = 1000,
@@ -39,13 +40,13 @@ struct editorConfig{
     int cx, cy;
     int rx;
 
-    int rowoff;
-    int coloff;
+    int rowoff; //Top row
+    int coloff; //left-most column
 
-    int screenrows;
-    int screencols;
+    int screenrows; //Number of rows the screen is made up of
+    int screencols; //Number of columns the screen is made up of
 
-    int numrows;
+    int numrows; //Number of rows we've actually written
     erow *row;
 
     char *filename;
@@ -58,6 +59,7 @@ struct editorConfig{
 
     DWORD originalMode;
     WORD default_attr;
+    boolean onTypeScroll; //Is typewriter scroll active or not?
 };
 
 struct editorConfig E;
@@ -297,6 +299,18 @@ void editorProcessKeypress()
         case CTRL_KEY('f'):
             editorFind();
             break;
+
+        case CTRL_KEY('t'):
+            if (E.onTypeScroll)
+            {
+                E.onTypeScroll = 0;
+                E.rowoff = 0;
+            }
+            else {
+                E.onTypeScroll = 1;
+            }
+            
+            break;
         
         case ARROW_UP:
         case ARROW_DOWN:
@@ -408,6 +422,12 @@ void editorDrawRows()
     for (int y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
 
+        if (filerow < 0 && E.onTypeScroll)
+        {
+            WriteConsoleA(E.hOutput,"\r\n",2,NULL,NULL);
+            continue;
+        }
+        
         if (filerow >= E.numrows) {
             WriteConsoleA(E.hOutput, "~\r\n", 3, NULL, NULL);
         } else {
@@ -470,7 +490,10 @@ void editorDrawStatusBar() {
 
 void editorRefreshScreen()
 {
-    TypewriterScroll();
+    if (E.onTypeScroll)
+        TypewriterScroll();
+    else
+        editorScroll();
 
     // Clear the screen using Windows API
     CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -529,7 +552,7 @@ void TypewriterScroll()
     int halfway = E.screenrows/2;
 
     E.rowoff = E.cy - halfway;
-    E.rowoff = E.rowoff < 0 ? 0 : E.rowoff;
+    // E.rowoff = E.rowoff < 0 ? 0 : E.rowoff;
 
     //! Horizontal cursor movement is the same
     if (E.cy < E.numrows) {
@@ -796,6 +819,7 @@ void initEditor()
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
 
+    E.onTypeScroll = 0;
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) { //? Why would this be -1?
         exit(1);
     }
