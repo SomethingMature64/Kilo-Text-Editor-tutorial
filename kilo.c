@@ -18,6 +18,9 @@ void editorFind();
 void editorScroll();
 void TypewriterScroll();
 void editorRefreshScreen();
+int editorRowCxToRx();
+void editorAddKeyword();
+void editorRemoveKeyword();
 
 enum editorKey {
     ARROW_LEFT = 1000,
@@ -32,9 +35,18 @@ typedef struct erow {
 
     int rsize;
     char *render;
-    int *hl;
+    WORD* hl; // The actual console attributes for the row. It's an array of console attributes
     
 } erow;
+
+typedef struct {
+    char* word;
+    WORD attr; // exact Windows attribute to use (e.g 0x0A Light green)
+} Keyword;
+
+// Search colors (now stored directly in hl[])
+#define HL_SEARCH_OTHER (BACKGROUND_BLUE|FOREGROUND_INTENSITY)
+#define HL_SEARCH_MATCH (BACKGROUND_RED|BACKGROUND_GREEN|FOREGROUND_INTENSITY)
 
 struct editorConfig{
     int cx, cy;
@@ -59,7 +71,10 @@ struct editorConfig{
 
     DWORD originalMode;
     WORD default_attr;
-    boolean onTypeScroll; //Is typewriter scroll active or not?
+    boolean onTypeScroll; //Is1 typewriter scroll active or not?
+
+    Keyword* Keywords;
+    int num_keywords;
 };
 
 struct editorConfig E;
@@ -116,8 +131,36 @@ void editorUpdateRow(erow *row) /// Prepares the render version of a row
 
     row->render[idx] = '\0';
     row->rsize = idx;
-    row->hl = realloc(row->hl, sizeof(int) * row->rsize);
-    memset(row->hl, 0, sizeof(int) * row->rsize);
+    row->hl = realloc(row->hl, sizeof(WORD) * row->rsize);
+    for (int i = 0; i < row->rsize; i++)
+        row->hl[i] = E.default_attr; //default color
+
+    for (int k = 0; k < E.num_keywords; k++)
+    {
+        Keyword* kw = &E.Keywords[k];
+        char* p = row->chars;
+        size_t kwlen = strlen(kw->word);
+
+        while ((p=strstr(p,kw->word))!=NULL)
+        {
+            int start = p - row->chars;
+
+            //whole-word check (prevents "if" inside "diff" or "printf")
+            int is_word_start = (start==0 || !isalnum(row->chars[start - 1]));
+            int is_word_end = (start + kwlen == row->size || !isalnum(row->chars[start + kwlen]));
+
+            if (is_word_start && is_word_end)
+            {
+                int rx = editorRowCxToRx(row,start);
+                for (size_t j = 0; j < kwlen; j++)
+                {
+                    if(rx+j<row->rsize)
+                        row->hl[rx + j] = kw->attr;
+                }
+            }
+            p += kwlen;
+        }
+    }
 }
 
 void editorAppendRow(char *s, size_t len)
@@ -319,6 +362,14 @@ void editorProcessKeypress()
             editorMoveCursor(c);
             break;
 
+        case CTRL_KEY('n'):
+            editorAddKeyword();
+            break;
+        case CTRL_KEY('d'):
+            editorRemoveKeyword();
+            break;
+
+
         default:
             if (!iscntrl(c))
             {
@@ -431,30 +482,24 @@ void editorDrawRows()
         if (filerow >= E.numrows) {
             WriteConsoleA(E.hOutput, "~\r\n", 3, NULL, NULL);
         } else {
+            erow* row = &E.row[filerow];
+
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0; //If it's shorter than the row width then give us 0(if the row contents are off screen to the left)
             if (len > E.screencols) len = E.screencols; //If it's longer than the row then only display the part that is the screen width
 
             char *c = &E.row[filerow].render[E.coloff]; //for row filerow get me the location of the first character at the column offset
-            int *hl = &E.row[filerow].hl[E.coloff]; //From the color array get me the first character as well
+            WORD *hl = &E.row[filerow].hl[E.coloff]; //From the color array get me the first character as well
 
-            int last_hl = -1;
+            WORD last_hl = -1;
             for (int j = 0; j < len; j++)
             {
-                if (hl[j] != last_hl) {
-                    WORD attr = E.default_attr;
-                    if (hl[j] == HL_MATCH) {
-                        // Bright (current match)
-                        attr = BACKGROUND_RED | BACKGROUND_GREEN; // yellow
-                    }
-                    else if (hl[j] == HL_OTHER) {
-                        // Dim (other matches)
-                        attr = BACKGROUND_BLUE | FOREGROUND_INTENSITY; 
-                    }
-                    SetConsoleTextAttribute(E.hOutput, attr);
+                if (hl[j] != last_hl)
+                {
+                    SetConsoleTextAttribute(E.hOutput,hl[j]);
                     last_hl = hl[j];
                 }
-                WriteConsoleA(E.hOutput, &c[j], 1, NULL, NULL);
+                WriteConsoleA(E.hOutput,&c[j],1,NULL,NULL);
             }
             SetConsoleTextAttribute(E.hOutput, E.default_attr);
         
@@ -629,7 +674,8 @@ void editorFindCallback(char *query, int key)
 
     // Clear all highlights
     for (int i = 0; i < E.numrows; i++) {
-        memset(E.row[i].hl, HL_NORMAL, sizeof(int) * E.row[i].rsize);
+        for(int j = 0; j<E.row[i].rsize;j++)
+            E.row[i].hl[j] = E.default_attr;
     }
 
     if (key == '\r' || key == 27) {
@@ -659,7 +705,7 @@ void editorFindCallback(char *query, int key)
 
             for (int j = 0; j < query_len; j++) {
                 if (rx + j < E.row[i].rsize)
-                    E.row[i].hl[rx + j] = HL_OTHER;
+                    E.row[i].hl[rx + j] = HL_SEARCH_OTHER;
             }
 
             match += query_len;
@@ -695,13 +741,114 @@ void editorFindCallback(char *query, int key)
             int rx = E.rx;
             for (int j = 0; j < query_len; j++) {
                 if (rx + j < E.row[current].rsize)
-                    E.row[current].hl[rx + j] = HL_MATCH;
+                    E.row[current].hl[rx + j] = HL_SEARCH_MATCH;
             }
 
             break;
         }
     }
 }
+
+void editorLoadKeywords(const char *filename)
+{
+    FILE *fp = fopen(filename,"r");
+    if(!fp)
+    {
+        E.Keywords = NULL;
+        E.num_keywords = 0;
+        return;
+    }
+
+    char line[256];
+    E.Keywords = NULL;
+    E.num_keywords = 0;
+
+    while (fgets(line,sizeof(line),fp)) //Get 256 chars from the file into line
+    {
+        if (line[0] == "#" || line[0] =='\n' || line[0]=='\r') continue;
+        char word[64];
+        unsigned int attr_val;
+        if (sscanf(line,"%63s %x",word,&attr_val)==2) //? %63s %x
+        {
+            E.Keywords = realloc(E.Keywords,sizeof(Keyword)*(E.num_keywords+1));
+            E.Keywords[E.num_keywords].word = _strdup(word);
+            E.Keywords[E.num_keywords].attr = (WORD)attr_val;
+            E.num_keywords++;
+        }
+        
+    }
+    fclose(fp);
+}
+
+void editorSaveKeywords(const char *filename)
+{
+    FILE* fp =fopen(filename,"w");
+    if (!fp)return;
+
+    fprintf(fp,"# Kilo keyword syntax highlighting config\n");
+    fprintf(fp,"# Format: keyword 0xXXXX (XXXX = Windows attribute in hex)\n\n");
+
+    for (int i = 0; i < E.num_keywords; i++)
+    {
+        fprintf(fp,"%s 0x%04X\n",E.Keywords[i].word,E.Keywords[i].attr); //? %s 0x%04X
+    }
+    fclose(fp);
+}
+
+void editorAddKeyword()
+{
+    char* input = editorPrompt("Add keyword (name 0xXXXX): %s",NULL);
+    if(!input) return;
+
+    char word[64];
+    unsigned int attr_val;
+    if (sscanf(input,"%63s %x", word, &attr_val)==2)
+    {
+        E.Keywords = realloc(E.Keywords, sizeof(Keyword)*(E.num_keywords+1));
+        E.Keywords[E.num_keywords].word = _strdup(word);
+        E.Keywords[E.num_keywords].attr = (WORD)attr_val;
+        E.num_keywords++;
+
+        //re-apply syntax to whole document
+        for(int i = 0; i< E.numrows;i++)
+            editorUpdateRow(&E.row[i]);
+        
+        editorSaveKeywords("keywords.kfig");
+        snprintf(E.statusmsg,sizeof(E.statusmsg),"Added '%s'",word);
+    }
+    free(input);
+    
+}
+
+void editorRemoveKeyword()
+{
+    char *input = editorPrompt("Remove keyword: %s", NULL);
+    if(!input) return;
+
+    for (int i = 0; i < E.num_keywords; i++)
+    {
+        if (strcmp(E.Keywords[i].word,input)==0){
+            free(E.Keywords[i].word);
+        
+            //shift remaining keywords down
+            memmove(&E.Keywords[i],&E.Keywords[i+1],sizeof(Keyword)*(E.num_keywords-i-1));
+            E.num_keywords--;
+
+            //re-apply syntax
+            for (int r = 0; r < E.numrows; r++)
+                editorUpdateRow(&E.row[r]);
+            
+            editorSaveKeywords("keywords.kfig");
+            snprintf(E.statusmsg,sizeof(E.statusmsg),"Removed '%s'",input);
+            free(input);
+            return;
+        }
+    }
+    snprintf(E.statusmsg,sizeof(E.statusmsg),"Keyword '%s' not found",input);
+    free(input);
+}
+
+
 
 void editorFind()
 {
@@ -829,6 +976,8 @@ void initEditor()
     E.default_attr = csbi.wAttributes;
 
     E.screenrows -= 2; //? why
+
+    editorLoadKeywords("keywords.kfig");
 }
 
 /*** main ***/

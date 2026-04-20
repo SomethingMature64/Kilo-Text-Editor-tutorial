@@ -1,0 +1,14 @@
+# Kilo keyword syntax highlighting config
+# Format: keyword 0xXXXX (XXXX = Windows attribute in hex)
+
+# 0x000F
+if 0x000A
+else 0x000A
+while 0x000A
+for 0x000A
+int 0x000D
+return 0x000C
+void 0x000D
+char 0x000D
+struct 0x000E
+hello 0x00A0
