@@ -672,81 +672,90 @@ void editorFindCallback(char *query, int key)
     static int last_match = -1;
     static int direction = 1;
 
-    // Clear all highlights
-    for (int i = 0; i < E.numrows; i++) {
-        for(int j = 0; j<E.row[i].rsize;j++)
-            E.row[i].hl[j] = E.default_attr;
+    if (key == '\r' || key == 27)
+    {
+        // restore normal syntax highlighting on all lines
+        for (int i = 0; i < E.numrows; i++)
+        {
+            editorUpdateRow(&E.row[i]);
+        }
+        last_match = -1;
+        return;
     }
 
-    if (key == '\r' || key == 27) {
-        last_match = -1;
-        direction = 1;
-        return;
-    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+    // Direction handling (optional but useful)
+    if (key == ARROW_RIGHT || key == ARROW_DOWN) {
         direction = 1;
     } else if (key == ARROW_LEFT || key == ARROW_UP) {
         direction = -1;
-    } else {
-        last_match = -1;
-        direction = 1;
     }
 
-    int query_len = strlen(query);
+    int query_len = query ? strlen(query) : 0;
+    if (query_len == 0) return;
 
-    // 🔥 STEP 1: Highlight ALL matches as HL_OTHER
-    for (int i = 0; i < E.numrows; i++) {
-        char *row = E.row[i].chars;
-        char *match = row;
+    // Clear all highlights back to default to default_attr first
+    for (int i = 0; i < E.numrows; i++)
+    {
+        erow *row = &E.row[i];
+        for (int j = 0; j < row->rsize; j++)
+        {
+            row->hl[j] = E.default_attr;
+        }
+        
+    }
 
-        while ((match = strstr(match, query)) != NULL) {
-            int cx = match - row;
+    for (int i = 0; i<E.numrows; i++)
+    {
+        erow *row = &E.row[i];
+        char *match = row->chars;
 
-            int rx = editorRowCxToRx(&E.row[i], cx);
+        while ((match =strstr(match,query))!=NULL)
+        {
+            int cx = match - row->chars;
+            int rx = editorRowCxToRx(row,cx);
 
-            for (int j = 0; j < query_len; j++) {
-                if (rx + j < E.row[i].rsize)
-                    E.row[i].hl[rx + j] = HL_SEARCH_OTHER;
+            for (int j = 0; j < query_len; j++)
+            {
+                if (rx + j < row->rsize)
+                {
+                    row->hl[rx+j]=HL_SEARCH_OTHER;
+                }
             }
-
-            match += query_len;
+            match +=query_len;
         }
     }
-
-    // 🔥 STEP 2: Find NEXT match (your existing logic)
+    
+    if (last_match == -1) direction = 1;
+    
     int current = last_match;
-
-    for (int i = 0; i < E.numrows; i++) {
+    do{
         current += direction;
+        if(current < 0) current = E.numrows - 1;
+        if (current>=E.numrows) current = 0;
 
-        if (current == -1) current = E.numrows - 1;
-        else if (current == E.numrows) current = 0;
+        erow *row = &E.row[current];
+        char *match = strstr(row->chars,query);
+        if (match)
+        {
+            int cx = match - row->chars;
+            int rx = editorRowCxToRx(row,cx);
 
-        char *match = strstr(E.row[current].chars, query);
-
-        if (match) {
-            last_match = current;
+            for (int j = 0; j < query_len; j++)
+            {
+                if (rx + j < row->rsize)
+                {
+                    row->hl[rx+j] = HL_SEARCH_MATCH;
+                }
+            }
 
             E.cy = current;
-            E.cx = match - E.row[current].chars;
-            E.rx = editorRowCxToRx(&E.row[current], E.cx);
+            E.cx = cx;
+            editorScroll();
 
-            // Center scroll
-            E.rowoff = E.cy - E.screenrows / 2;
-            if (E.rowoff < 0) E.rowoff = 0;
-
-            E.coloff = E.rx - E.screencols / 2;
-            if (E.coloff < 0) E.coloff = 0;
-
-            // 🔥 STEP 3: Override current match → HL_MATCH
-            int rx = E.rx;
-            for (int j = 0; j < query_len; j++) {
-                if (rx + j < E.row[current].rsize)
-                    E.row[current].hl[rx + j] = HL_SEARCH_MATCH;
-            }
-
+            last_match = current;
             break;
         }
-    }
+    } while (current!=last_match);
 }
 
 void editorLoadKeywords(const char *filename)
