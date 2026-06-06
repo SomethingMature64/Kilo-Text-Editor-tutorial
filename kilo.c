@@ -29,6 +29,10 @@ enum editorKey {
     ARROW_DOWN
 };
 
+    /*Struct contatining 3 arrays
+    The first being the array of characters that it stores, alongside its respective size variable
+    Then the second containing the size of the rendered array (we can expand some single characters for display)
+    and finally a word array containing the highlight details of the row*/
 typedef struct erow {
     int size;
     char *chars;
@@ -75,6 +79,10 @@ struct editorConfig{
 
     Keyword* Keywords;
     int num_keywords;
+
+    char **prev_render; //previous rendered text lines (screenrows lines)
+    WORD **prev_hl; //previous highlight attributes (WORD per char)
+    int prev_numrows; //how many lines were visible last frame
 };
 
 struct editorConfig E;
@@ -468,6 +476,22 @@ void editorInsertChar(int c)
 }
 
 /*** output ***/
+void editorFreePrevFrame()
+{
+    if (E.prev_render)
+    {
+        for (int i = 0; i < E.screenrows; i++) free(E.prev_render[i]);
+        free(E.prev_render);
+    }
+    if (E.prev_hl)
+    {
+        for (int i = 0; i < E.screenrows; i++) free(E.prev_hl[i]);
+        free(E.prev_hl);
+    }
+    E.prev_render = NULL;
+    E.prev_hl = NULL;
+    
+}
 void editorDrawRows()
 {
     for (int y = 0; y < E.screenrows; y++) {
@@ -540,22 +564,87 @@ void editorRefreshScreen()
     else
         editorScroll();
 
-    // Clear the screen using Windows API
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (GetConsoleScreenBufferInfo(E.hOutput, &csbi)) {
-        DWORD written;
-        COORD coord = {0, 0};
-        FillConsoleOutputCharacter(E.hOutput, ' ', csbi.dwSize.X * csbi.dwSize.Y, coord, &written);
-        FillConsoleOutputAttribute(E.hOutput, csbi.wAttributes, csbi.dwSize.X * csbi.dwSize.Y, coord, &written);
-        SetConsoleCursorPosition(E.hOutput, coord);
+    // Allocate / resize previous frame buffers if needed
+    if (E.prev_render == NULL || E.prev_numrows != E.screenrows) {
+        editorFreePrevFrame();
+
+        E.prev_render = malloc(sizeof(char*) * E.screenrows);
+        E.prev_hl = malloc(sizeof(WORD*) * E.screenrows);
+        for (int i = 0; i < E.screenrows; i++) {
+            E.prev_render[i] = calloc(E.screencols + 1, 1);   // +1 for safety
+            E.prev_hl[i]    = calloc(E.screencols, sizeof(WORD));
+        }
+        E.prev_numrows = E.screenrows;
     }
 
-    editorDrawRows();
+    // Move cursor to top-left once
+    COORD top_left = {0, 0};
+    SetConsoleCursorPosition(E.hOutput, top_left);
+
+    // Draw line by line with diffing
+    for (int y = 0; y < E.screenrows; y++) {
+        int filerow = y + E.rowoff;
+
+        char current_line[E.screencols + 1];
+        WORD current_hl[E.screencols];
+
+        // Build what should be on this screen line now
+        if (filerow >= E.numrows) {
+            // Empty line (~)
+            memset(current_line, ' ', E.screencols);
+            current_line[E.screencols] = '\0';
+            for (int x = 0; x < E.screencols; x++) current_hl[x] = E.default_attr;
+            strncpy(current_line, "~", 1);
+        } else {
+            erow *row = &E.row[filerow];
+            int len = row->rsize - E.coloff;
+            if (len < 0) len = 0;
+            if (len > E.screencols) len = E.screencols;
+
+            memcpy(current_line, &row->render[E.coloff], len);
+            memcpy(current_hl, &row->hl[E.coloff], len * sizeof(WORD));
+
+            // Pad the rest with spaces + default color
+            memset(current_line + len, ' ', E.screencols - len);
+            for (int x = len; x < E.screencols; x++) current_hl[x] = E.default_attr;
+            current_line[E.screencols] = '\0';
+        }
+
+        // === DIFF: Only redraw if the line actually changed ===
+        int line_changed = 0;
+        if (memcmp(E.prev_render[y], current_line, E.screencols) != 0 ||
+            memcmp(E.prev_hl[y], current_hl, E.screencols * sizeof(WORD)) != 0) {
+
+            line_changed = 1;
+
+            // Move cursor to start of this row
+            COORD pos = {0, (SHORT)y};
+            SetConsoleCursorPosition(E.hOutput, pos);
+
+            // Draw the line with color changes
+            WORD last_attr = (WORD)-1;
+            for (int x = 0; x < E.screencols; x++) {
+                if (current_hl[x] != last_attr) {
+                    SetConsoleTextAttribute(E.hOutput, current_hl[x]);
+                    last_attr = current_hl[x];
+                }
+                WriteConsoleA(E.hOutput, &current_line[x], 1, NULL, NULL);
+            }
+        }
+
+        // Update previous frame
+        memcpy(E.prev_render[y], current_line, E.screencols + 1);
+        memcpy(E.prev_hl[y], current_hl, E.screencols * sizeof(WORD));
+    }
+
+    // Draw status bar (always redraw for simplicity, or you can diff it too)
     editorDrawStatusBar();
 
-    COORD cursor_coord = {(SHORT)(E.rx - E.coloff), (SHORT)(E.cy - E.rowoff)};
-    SetConsoleCursorPosition(E.hOutput, cursor_coord);
+    // Place cursor at final position
+    COORD cursor_pos = {(SHORT)(E.rx - E.coloff), (SHORT)(E.cy - E.rowoff)};
+    SetConsoleCursorPosition(E.hOutput, cursor_pos);
 }
+
 
 /*** editor operations ***/
 
@@ -987,6 +1076,11 @@ void initEditor()
     E.screenrows -= 2; //? why
 
     editorLoadKeywords("keywords.kfig");
+
+    //Initialize previous frame buffers
+    E.prev_render = NULL;
+    E.prev_hl = NULL;
+    E.prev_numrows = 0;
 }
 
 /*** main ***/
